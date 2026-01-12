@@ -54,33 +54,118 @@ def robust_resonance_equation(k, L, r1, r2, epsilon, c, rho):
     C22 = np.cos(k*r_b)/r_b + Z_rad_b/(1j*k*c*rho) * (-k*np.sin(k*r_b)/r_b - np.cos(k*r_b)/r_b**2)
     determinant = C11 * C22 - C12 * C21
     return np.abs(determinant)
-def calculate_resonances_with_radiation(L, r1, r2, epsilon, c, rho, n_max, debug_prints=False):
-    modes = np.arange(1, n_max + 1)
+def _scan_k_space(L, r1, r2, epsilon, c, rho, n_max):
+    """
+    Generate k-space and scan for resonance equation minima.
+
+    Returns:
+        k_scan: Array of k values to scan
+        scan_values: Determinant values at each k point
+    """
     k_max = (n_max + 2) * np.pi / L
     k_scan = np.linspace(1e-2, k_max, 4000)
     v_resonance_eq = np.vectorize(robust_resonance_equation)
     scan_values = v_resonance_eq(k_scan, L, r1, r2, epsilon, c, rho)
+    return k_scan, scan_values
+
+def _find_resonance_candidates(k_scan, scan_values):
+    """
+    Identify local minima in the scanned resonance equation as candidate resonances.
+
+    Returns:
+        minima_indices: Indices of local minima in k_scan array
+    """
     minima_indices, _ = find_peaks(-scan_values, distance=100)
+    return minima_indices
+
+def _optimize_single_resonance(k_scan, idx, L, r1, r2, epsilon, c, rho):
+    """
+    Refine a single resonance candidate using optimization.
+
+    Args:
+        k_scan: Array of k values
+        idx: Index of the candidate in k_scan
+        L, r1, r2, epsilon, c, rho: Physical parameters
+
+    Returns:
+        k_resonance: Optimized k value, or np.nan if optimization failed
+    """
+    k_approx = k_scan[idx]
+    bracket_low = k_scan[max(0, idx - 10)]
+    bracket_high = k_scan[min(len(k_scan) - 1, idx + 10)]
+
+    res = minimize_scalar(
+        robust_resonance_equation,
+        args=(L, r1, r2, epsilon, c, rho),
+        bracket=(bracket_low, bracket_high),
+        method='brent'
+    )
+
+    return res.x if res.success else np.nan
+
+def calculate_resonances_with_radiation(L, r1, r2, epsilon, c, rho, n_max, debug_prints=False):
+    """
+    Calculate resonance frequencies for a conical resonator including radiation impedance.
+
+    This function performs a multi-step process:
+    1. Scan k-space to find approximate resonance locations
+    2. Detect local minima as resonance candidates
+    3. Refine each candidate using optimization
+    4. Convert k values to frequencies
+
+    Args:
+        L: Length of the cone (m)
+        r1, r2: Initial and final radii (m)
+        epsilon: Cone taper parameter
+        c: Speed of sound (m/s)
+        rho: Air density (kg/m^3)
+        n_max: Maximum number of modes to find
+        debug_prints: If True, print diagnostic information
+
+    Returns:
+        modes: Array of mode numbers [1, 2, ..., n_max]
+        frequencies_n: Array of resonance frequencies (Hz)
+    """
+    modes = np.arange(1, n_max + 1)
+
+    # Step 1: Scan k-space for resonances
+    k_scan, scan_values = _scan_k_space(L, r1, r2, epsilon, c, rho, n_max)
+
+    # Step 2: Find candidate resonances (local minima)
+    minima_indices = _find_resonance_candidates(k_scan, scan_values)
+
     if debug_prints:
         print("\n--- DEBUG START: Searching for Resonances with Radiation ---")
         print(f"Scanned 'k' range: {k_scan[0]:.2f} to {k_scan[-1]:.2f}")
         print(f"Found {len(minima_indices)} local minima at approx k: {[f'{k_scan[i]:.2f}' for i in minima_indices]}")
+
+    # Step 3: Optimize each candidate to find precise resonance
     k_resonances = []
     for i, idx in enumerate(minima_indices):
-        if i >= n_max: break
-        k_approx = k_scan[idx]
-        bracket_low = k_scan[max(0, idx - 10)]; bracket_high = k_scan[min(len(k_scan)-1, idx + 10)]
-        res = minimize_scalar(robust_resonance_equation, args=(L, r1, r2, epsilon, c, rho), bracket=(bracket_low, bracket_high), method='brent')
-        if res.success:
-            k_n = res.x
-            k_resonances.append(k_n)
-            if debug_prints: print(f"  Mode {i+1}: k_approx={k_approx:.3f} -> Fine optimization -> k_res={k_n:.5f} (Freq: {c*k_n/(2*np.pi):.2f} Hz)")
-        else:
-            k_resonances.append(np.nan)
-            if debug_prints: print(f"  Mode {i+1}: Optimization failed near k={k_approx:.3f}")
-    if debug_prints: print("--- DEBUG END ---\n")
-    while len(k_resonances) < n_max: k_resonances.append(np.nan)
+        if i >= n_max:
+            break
+
+        k_optimized = _optimize_single_resonance(k_scan, idx, L, r1, r2, epsilon, c, rho)
+        k_resonances.append(k_optimized)
+
+        if debug_prints:
+            k_approx = k_scan[idx]
+            if not np.isnan(k_optimized):
+                freq = c * k_optimized / (2 * np.pi)
+                print(f"  Mode {i+1}: k_approx={k_approx:.3f} -> Fine optimization -> k_res={k_optimized:.5f} (Freq: {freq:.2f} Hz)")
+            else:
+                print(f"  Mode {i+1}: Optimization failed near k={k_approx:.3f}")
+
+    if debug_prints:
+        print("--- DEBUG END ---\n")
+
+    # Step 4: Pad with NaN if fewer resonances found than requested
+    while len(k_resonances) < n_max:
+        k_resonances.append(np.nan)
+
+    # Step 5: Convert k values to frequencies
     frequencies_n = (c * np.array(k_resonances)) / (2 * np.pi)
+
     return modes, frequencies_n
 def calculate_equivalent_lengths(modes, freqs_ref, L, epsilon, r_avg, c):
     leq_ref = modes * c / (2 * freqs_ref)
