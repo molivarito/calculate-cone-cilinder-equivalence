@@ -43,16 +43,112 @@ def z_radiation(k, radius, c, rho):
     R_rad = rho * c / S * (k**2 * radius**2) / 2
     X_rad = rho * c / S * (8 * k * radius) / (3 * np.pi)
     return complex(R_rad, X_rad)
+def _compute_wave_function_and_derivative(k, r):
+    """
+    Compute spherical wave function phi and its derivative dphi/dr at radius r.
+
+    For spherical waves in the conical approximation:
+    phi(r) = sin(kr)/r, dphi/dr = k*cos(kr)/r - sin(kr)/r^2
+
+    Args:
+        k: Wave number
+        r: Normalized radial coordinate
+
+    Returns:
+        phi: Wave function value
+        dphi_dr: Radial derivative
+    """
+    kr = k * r
+    phi = np.sin(kr) / r
+    dphi_dr = k * np.cos(kr) / r - np.sin(kr) / r**2
+    return phi, dphi_dr
+
+def _compute_boundary_matrix_coefficient(phi, dphi_dr, Z_rad, k, c, rho, sign=1):
+    """
+    Compute a single coefficient of the boundary condition matrix.
+
+    The boundary conditions couple the wave function to radiation impedance:
+    dphi/dr ± Z_rad/(i*k*c*rho) * phi = 0
+
+    Args:
+        phi: Wave function at boundary (sin or cos component)
+        dphi_dr: Derivative of wave function
+        Z_rad: Radiation impedance at this boundary
+        k, c, rho: Wave number, sound speed, density
+        sign: +1 for outgoing wave (end), -1 for incoming wave (start)
+
+    Returns:
+        Matrix coefficient combining wave function and radiation terms
+    """
+    impedance_factor = Z_rad / (1j * k * c * rho)
+    return phi + sign * impedance_factor * dphi_dr
+
 def robust_resonance_equation(k, L, r1, r2, epsilon, c, rho):
-    if k <= 1e-3: return 1e12
+    """
+    Compute the resonance condition for a conical resonator with radiation impedance.
+
+    This function calculates the determinant of a 2x2 boundary condition matrix
+    that couples spherical wave solutions to radiation impedance at both ends.
+    Resonances occur where this determinant approaches zero.
+
+    Physics:
+    - The conical geometry is approximated by spherical wave functions
+    - r_start, r_end are normalized coordinates along the cone axis
+    - Radiation impedance accounts for energy loss at the openings
+    - The matrix determinant = 0 is the eigenvalue condition for resonance
+
+    Args:
+        k: Wave number to test (rad/m)
+        L: Physical length of cone (m)
+        r1, r2: Radii at start and end (m)
+        epsilon: Taper parameter (r2-r1)/L
+        c: Speed of sound (m/s)
+        rho: Air density (kg/m^3)
+
+    Returns:
+        Absolute value of matrix determinant (small values indicate resonance)
+    """
+    # Guard against invalid wave numbers
+    if k <= 1e-3:
+        return 1e12
+
+    # Compute normalized radial coordinates for spherical wave approximation
     abs_epsilon = np.abs(epsilon) if epsilon != 0 else 1e-9
-    r_a, r_b = r1 / abs_epsilon, r2 / abs_epsilon
-    Z_rad_a = z_radiation(k, r1, c, rho); Z_rad_b = z_radiation(k, r2, c, rho)
-    C11 = np.sin(k*r_a)/r_a - Z_rad_a/(1j*k*c*rho) * (k*np.cos(k*r_a)/r_a - np.sin(k*r_a)/r_a**2)
-    C12 = np.cos(k*r_a)/r_a - Z_rad_a/(1j*k*c*rho) * (-k*np.sin(k*r_a)/r_a - np.cos(k*r_a)/r_a**2)
-    C21 = np.sin(k*r_b)/r_b + Z_rad_b/(1j*k*c*rho) * (k*np.cos(k*r_b)/r_b - np.sin(k*r_b)/r_b**2)
-    C22 = np.cos(k*r_b)/r_b + Z_rad_b/(1j*k*c*rho) * (-k*np.sin(k*r_b)/r_b - np.cos(k*r_b)/r_b**2)
-    determinant = C11 * C22 - C12 * C21
+    r_start = r1 / abs_epsilon
+    r_end = r2 / abs_epsilon
+
+    # Compute radiation impedances at both boundaries
+    Z_rad_start = z_radiation(k, r1, c, rho)
+    Z_rad_end = z_radiation(k, r2, c, rho)
+
+    # Evaluate wave functions (sin and cos basis) at start boundary
+    phi_sin_start, dphi_sin_start = _compute_wave_function_and_derivative(k, r_start)
+    phi_cos_start = np.cos(k * r_start) / r_start
+    dphi_cos_start = -k * np.sin(k * r_start) / r_start - np.cos(k * r_start) / r_start**2
+
+    # Evaluate wave functions at end boundary
+    phi_sin_end, dphi_sin_end = _compute_wave_function_and_derivative(k, r_end)
+    phi_cos_end = np.cos(k * r_end) / r_end
+    dphi_cos_end = -k * np.sin(k * r_end) / r_end - np.cos(k * r_end) / r_end**2
+
+    # Construct 2x2 boundary condition matrix
+    # Matrix element [i,j]: boundary i, basis function j (sin=0, cos=1)
+    M11 = _compute_boundary_matrix_coefficient(
+        phi_sin_start, dphi_sin_start, Z_rad_start, k, c, rho, sign=-1
+    )
+    M12 = _compute_boundary_matrix_coefficient(
+        phi_cos_start, dphi_cos_start, Z_rad_start, k, c, rho, sign=-1
+    )
+    M21 = _compute_boundary_matrix_coefficient(
+        phi_sin_end, dphi_sin_end, Z_rad_end, k, c, rho, sign=+1
+    )
+    M22 = _compute_boundary_matrix_coefficient(
+        phi_cos_end, dphi_cos_end, Z_rad_end, k, c, rho, sign=+1
+    )
+
+    # Compute determinant: resonances occur where det(M) ≈ 0
+    determinant = M11 * M22 - M12 * M21
+
     return np.abs(determinant)
 def _scan_k_space(L, r1, r2, epsilon, c, rho, n_max):
     """
